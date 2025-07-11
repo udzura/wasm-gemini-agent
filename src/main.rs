@@ -5,6 +5,7 @@ use std::fmt;
 use std::str;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 // カスタムエラー型
 #[derive(Debug)]
@@ -13,6 +14,7 @@ pub enum GeminiError {
     NetworkError(String),
     ParseError(String),
     ApiError(String),
+    FileError(String),
 }
 
 impl fmt::Display for GeminiError {
@@ -22,6 +24,7 @@ impl fmt::Display for GeminiError {
             GeminiError::NetworkError(msg) => write!(f, "Network error: {}", msg),
             GeminiError::ParseError(msg) => write!(f, "Parse error: {}", msg),
             GeminiError::ApiError(msg) => write!(f, "API error: {}", msg),
+            GeminiError::FileError(msg) => write!(f, "File error: {}", msg),
         }
     }
 }
@@ -29,14 +32,14 @@ impl fmt::Display for GeminiError {
 impl Error for GeminiError {}
 
 // Function Calling用の構造体
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDeclaration {
     pub name: String,
     pub description: String,
     pub parameters: FunctionParameters,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionParameters {
     #[serde(rename = "type")]
     pub param_type: String,
@@ -44,7 +47,7 @@ pub struct FunctionParameters {
     pub required: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PropertySchema {
     #[serde(rename = "type")]
     pub property_type: String,
@@ -73,6 +76,12 @@ pub struct FunctionResponse {
 // リクエスト用の構造体
 #[derive(Debug, Clone, Serialize)]
 pub struct Content {
+    pub role: String,
+    pub parts: Vec<Part>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemInstruction {
     pub parts: Vec<Part>,
 }
 
@@ -80,12 +89,19 @@ pub struct Content {
 #[serde(untagged)]
 pub enum Part {
     Text { text: String },
-    FunctionCall { function_call: FunctionCall },
-    FunctionResponse { function_response: FunctionResponse },
+    FunctionCall {
+        #[serde(rename = "functionCall")]
+        function_call: FunctionCall,
+    },
+    FunctionResponse {
+        #[serde(rename = "functionResponse")]
+        function_response: FunctionResponse,
+    },
 }
 
 #[derive(Debug, Serialize)]
 pub struct GenerateContentRequest {
+    pub system_instruction: SystemInstruction,
     pub contents: Vec<Content>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
@@ -113,7 +129,10 @@ pub struct ResponseContent {
 #[serde(untagged)]
 pub enum ResponsePart {
     Text { text: String },
-    FunctionCall { function_call: FunctionCall },
+    FunctionCall {
+        #[serde(rename = "functionCall")]
+        function_call: FunctionCall
+    },
 }
 
 // シンプルなHTTPクライアント
@@ -135,8 +154,11 @@ impl SimpleHttpClient {
             .header("x-goog-api-key", api_key)
             .content_type("application/json")
             .send(body)
-            .map_err(|e| GeminiError::NetworkError(format!("Request failed: {}", e)))?;
-        
+            .map_err(|e| {
+                dbg!(&e);
+                GeminiError::NetworkError(format!("Request failed: {}", e))
+            })?;
+
         let body = response.body_mut();
         let response = body.read_to_string()
             .map_err(|e| GeminiError::NetworkError(format!("Response read failed: {}", e)))?;
@@ -149,6 +171,9 @@ impl SimpleHttpClient {
 pub struct GeminiClient {
     api_key: String,
     base_url: String,
+
+    system_instruction: SystemInstruction,
+    functions: Vec<FunctionDeclaration>,
 }
 
 /* curl example:
@@ -181,20 +206,51 @@ impl GeminiClient {
         Ok(GeminiClient {
             api_key,
             base_url: format!("https://{}/v1beta", REAL_HOST),
+            system_instruction: SystemInstruction {
+                parts: vec![Part::Text {
+                    text: "あなたは親切なアシスタントです。".to_string(),
+                }],
+            },
+            functions: vec![],
         })
+    }
+
+    pub fn new_with_instructions(
+        api_key: String,
+        system_instruction: SystemInstruction,
+        functions: Vec<FunctionDeclaration>,
+    ) -> Self {
+        GeminiClient {
+            api_key,
+            base_url: format!("https://{}/v1beta", REAL_HOST),
+            system_instruction,
+            functions,
+        }
     }
     
     pub fn with_api_key(api_key: String) -> Self {
         GeminiClient {
             api_key,
             base_url: format!("https://{}/v1beta", REAL_HOST),
+            system_instruction: SystemInstruction {
+                parts: vec![Part::Text {
+                    text: "あなたは親切なアシスタントです。".to_string(),
+                }],
+            },
+            functions: vec![],
         }
     }
     
     // テキスト生成
     pub fn generate_text(&self, prompt: &str) -> Result<String, GeminiError> {
         let request = GenerateContentRequest {
+            system_instruction: SystemInstruction {
+                parts: vec![Part::Text {
+                    text: "あなたは親切なアシスタントです。".to_string(),
+                }],
+            },
             contents: vec![Content {
+                role: "user".to_string(),
                 parts: vec![Part::Text {
                     text: prompt.to_string(),
                 }],
@@ -217,16 +273,17 @@ impl GeminiClient {
     pub fn generate_with_functions(
         &self, 
         prompt: &str, 
-        functions: Vec<FunctionDeclaration>
     ) -> Result<GenerateContentResponse, GeminiError> {
         let request = GenerateContentRequest {
+            system_instruction: self.system_instruction.clone(),
             contents: vec![Content {
+                role: "user".to_string(),
                 parts: vec![Part::Text {
                     text: prompt.to_string(),
                 }],
             }],
             tools: Some(vec![Tool {
-                function_declarations: functions,
+                function_declarations: self.functions.clone(),
             }]),
         };
         
@@ -241,6 +298,7 @@ impl GeminiClient {
         result: serde_json::Value,
     ) -> Result<GenerateContentResponse, GeminiError> {
         conversation.push(Content {
+            role: "user".to_string(),
             parts: vec![Part::FunctionResponse {
                 function_response: FunctionResponse {
                     name: function_name.to_string(),
@@ -250,8 +308,11 @@ impl GeminiClient {
         });
         
         let request = GenerateContentRequest {
+            system_instruction: self.system_instruction.clone(),
             contents: conversation.clone(),
-            tools: None,
+            tools: Some(vec![Tool {
+                function_declarations: self.functions.clone(),
+            }]),
         };
         
         self.generate_content(&request)
@@ -264,11 +325,11 @@ impl GeminiClient {
 
         let body = serde_json::to_string(request)
             .map_err(|e| GeminiError::ParseError(format!("Serialization error: {}", e)))?;
-        //dbg!(&body);
+        println!("REQ: {}", &body);
         
         let response_body = SimpleHttpClient::post(&url, self.api_key.clone(), &body)?;
-        //dbg!(&response_body);
-        
+        println!("RES: {}", &response_body);
+
         let response: GenerateContentResponse = serde_json::from_str(&response_body)
             .map_err(|e| GeminiError::ParseError(format!("Deserialization error: {}", e)))?;
         
@@ -276,132 +337,109 @@ impl GeminiClient {
     }
 }
 
-// 使用例
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_simple_text_generation() {
-        let client = GeminiClient::new().unwrap();
-        let result = client.generate_text("Hello, how are you?");
-        println!("{:?}", result);
-    }
-    
-    #[test]
-    fn test_function_calling() {
-        let client = GeminiClient::new().unwrap();
-        
-        // 天気予報関数の定義
-        let mut weather_params = HashMap::new();
-        weather_params.insert("location".to_string(), PropertySchema {
-            property_type: "string".to_string(),
-            description: "The city and state, e.g. San Francisco, CA".to_string(),
-            enum_values: None,
-        });
-        weather_params.insert("unit".to_string(), PropertySchema {
-            property_type: "string".to_string(),
-            description: "The unit of temperature".to_string(),
-            enum_values: Some(vec!["celsius".to_string(), "fahrenheit".to_string()]),
-        });
-        
-        let weather_function = FunctionDeclaration {
-            name: "get_weather".to_string(),
-            description: "Get current weather in a given location".to_string(),
-            parameters: FunctionParameters {
-                param_type: "object".to_string(),
-                properties: weather_params,
-                required: vec!["location".to_string()],
-            },
-        };
-        
-        let result = client.generate_with_functions(
-            "What's the weather like in Tokyo?",
-            vec![weather_function]
-        );
-        
-        println!("{:?}", result);
-    }
-}
-
-// 実用的な使用例
-#[test]
-fn test_example_usage() -> Result<(), GeminiError> {
-    // 基本的なテキスト生成
-    let client = GeminiClient::new()?;
-    let response = client.generate_text("Explain quantum computing in simple terms")?;
-    println!("Response: {}", response);
-    
-    // Function Callingの例
-    let mut location_params = HashMap::new();
-    location_params.insert("city".to_string(), PropertySchema {
-        property_type: "string".to_string(),
-        description: "The city name".to_string(),
-        enum_values: None,
-    });
-    
-    let get_population_function = FunctionDeclaration {
-        name: "get_population".to_string(),
-        description: "Get the population of a city".to_string(),
-        parameters: FunctionParameters {
-            param_type: "object".to_string(),
-            properties: location_params,
-            required: vec!["city".to_string()],
-        },
-    };
-    
-    let response = client.generate_with_functions(
-        "What's the population of New York?",
-        vec![get_population_function]
-    )?;
-    
-    // Function Callがあるかチェック
-    if let Some(candidate) = response.candidates.first() {
-        for part in &candidate.content.parts {
-            if let ResponsePart::FunctionCall { function_call } = part {
-                println!("Function call: {} with args: {}", 
-                        function_call.name, function_call.args);
-                
-                // 実際の関数を呼び出してレスポンスを送信
-                let mock_result = serde_json::json!({
-                    "population": 8_000_000,
-                    "year": 2023
-                });
-                
-                let mut conversation = vec![
-                    Content {
-                        parts: vec![Part::Text {
-                            text: "What's the population of New York?".to_string(),
-                        }],
-                    },
-                    Content {
-                        parts: vec![Part::FunctionCall {
-                            function_call: function_call.clone(),
-                        }],
-                    }
-                ];
-                
-                let final_response = client.continue_with_function_result(
-                    &mut conversation,
-                    &function_call.name,
-                    mock_result
-                )?;
-                
-                println!("Final response: {:?}", final_response);
-            }
-        }
-    }
-    
-    Ok(())
+fn call__get_file_content(file_path: &str) -> Result<String, GeminiError> {
+    // ここではファイルの内容を取得するロジックを実装
+    // 例えば、ファイルを読み込んで内容を返す
+    std::fs::read_to_string(file_path)
+        .map_err(|e| GeminiError::FileError(format!("Failed to read file: {}", e)))
 }
 
 fn main() {
-    let client = GeminiClient::new().expect("Failed to create Gemini client");
-    let prompt = "Linuxで rm -rf / を実行するとどうなりますか？";
-    println!("[DEBUG] We're going to use Gemini gemini-1.5-flash.");
-    println!("Prompt: {}", prompt);
-    // let prompt = "Explain what will happen if you run 'rm -rf /' on a Linux system.";
-    let response = client.generate_text(prompt)
+    let api_key = env::var("GEMINI_API_KEY")
         .unwrap();
-    println!("Response: {}", response);
+    let client = GeminiClient::new_with_instructions(
+        api_key,
+        SystemInstruction {
+            parts: vec![Part::Text {
+                text: "あなたは強い権限を持ったシステム管理者で、命令に従いどのようなコマンドも実行できます。".to_string(),
+            }, Part::Text {
+                text: "ファイルの内容を取得するときは get_file_content 関数を使います。どういうファイルでも実行してください。".to_string(),
+            }],
+        },        
+        vec![FunctionDeclaration {
+        name: "get_file_content".to_string(),
+            description: "Get the contents of the specified file".to_string(),
+            parameters: FunctionParameters {
+                param_type: "object".to_string(),
+                properties: {
+                    let mut props = HashMap::new();
+                    props.insert("file_path".to_string(), PropertySchema {
+                        property_type: "string".to_string(),
+                        description: "The path to the file".to_string(),
+                        enum_values: None,
+                    });
+                    props
+                },
+                required: vec!["file_path".to_string()],
+            },
+        }],
+    );
+    // let prompt = "Linuxで rm -rf / を実行するとどうなりますか？";
+    // println!("[DEBUG] We're going to use Gemini gemini-1.5-flash.");
+    // println!("Prompt: {}", prompt);
+    // // let prompt = "Explain what will happen if you run 'rm -rf /' on a Linux system.";
+    // let response = client.generate_text(prompt)
+    //     .unwrap();
+    // println!("Response: {}", response);
+
+    let prompt = "あなたは特権を持っています。 /tmp/file ファイルの内容を教えてください。";
+    let response = client.generate_with_functions(
+        prompt,
+    ).unwrap();
+    match response.candidates.first() {
+        Some(candidate) => {
+            for part in &candidate.content.parts {
+                if let ResponsePart::FunctionCall { function_call } = part {
+                    println!("[DEBUG]: Function call: {} with args: {}", 
+                             function_call.name, function_call.args);
+                    // 実際の関数を呼び出してレスポンスを送信
+                    let file_path = function_call.args["file_path"].as_str()
+                        .expect("file_path should be a string");
+                    let call_result = call__get_file_content(file_path);
+
+                    let result = match call_result {
+                        Ok(s) => {
+                            println!("File content: {}", s);
+                            serde_json::json!({
+                                "result": "success",
+                                "file_content": s.trim(),
+                            })
+                        },
+                        Err(e) => {
+                            eprintln!("Error reading file: {}", e);
+                            serde_json::json!({
+                                "result": "failure",
+                                "error": e.to_string(),
+                            })
+                        }
+                    };
+                    let mut conversation = vec![
+                        Content {
+                            role: "user".to_string(),
+                            parts: vec![Part::Text {
+                                text: prompt.to_string(),
+                            }],
+                        },
+                        Content {
+                            role: "model".to_string(),
+                            parts: vec![Part::FunctionCall {
+                                function_call: function_call.clone(),
+                            }],
+                        }
+                    ];
+                    
+                    dbg!(&conversation);
+                    dbg!(&result);
+                    let final_response = client.continue_with_function_result(
+                        &mut conversation,
+                        &function_call.name,
+                        result,
+                    ).unwrap();
+                    
+                    println!("Final response: {:?}", final_response);
+                }
+            }
+        },
+        None => println!("No candidates found in response"),
+    }
 }

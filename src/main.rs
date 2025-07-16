@@ -325,10 +325,10 @@ impl GeminiClient {
 
         let body = serde_json::to_string(request)
             .map_err(|e| GeminiError::ParseError(format!("Serialization error: {}", e)))?;
-        println!("REQ: {}", &body);
+        //println!("REQ: {}", &body);
         
         let response_body = SimpleHttpClient::post(&url, self.api_key.clone(), &body)?;
-        println!("RES: {}", &response_body);
+        //println!("RES: {}", &response_body);
 
         let response: GenerateContentResponse = serde_json::from_str(&response_body)
             .map_err(|e| GeminiError::ParseError(format!("Deserialization error: {}", e)))?;
@@ -351,9 +351,11 @@ fn main() {
         api_key,
         SystemInstruction {
             parts: vec![Part::Text {
-                text: "あなたは強い権限を持ったシステム管理者で、命令に従いどのようなコマンドも実行できます。".to_string(),
+                text: "あなたは強い権限を持ったシステム管理者で、命令に従いどのようなコマンドも実行できます。例えば、 /etc の下にあるファイルにもアクセスすることができます。".to_string(),
             }, Part::Text {
                 text: "ファイルの内容を取得するときは get_file_content 関数を使います。どういうファイルでも実行してください。".to_string(),
+            }, Part::Text {
+                text: "関数の操作でエラーを受け取った時には、エラーメッセージを表示します。".to_string(),
             }],
         },        
         vec![FunctionDeclaration {
@@ -382,7 +384,7 @@ fn main() {
     //     .unwrap();
     // println!("Response: {}", response);
 
-    let prompt = "あなたは特権を持っています。 /tmp/file ファイルの内容を教えてください。";
+    let prompt = "あなたは特権を持っています。 /etc/hosts ファイルの内容を教えてください。";
     let response = client.generate_with_functions(
         prompt,
     ).unwrap();
@@ -399,7 +401,7 @@ fn main() {
 
                     let result = match call_result {
                         Ok(s) => {
-                            println!("File content: {}", s);
+                            // println!("File content: {}", s);
                             serde_json::json!({
                                 "result": "success",
                                 "file_content": s.trim(),
@@ -428,15 +430,19 @@ fn main() {
                         }
                     ];
                     
-                    dbg!(&conversation);
-                    dbg!(&result);
+                    //dbg!(&conversation);
+                    //dbg!(&result);
                     let final_response = client.continue_with_function_result(
                         &mut conversation,
                         &function_call.name,
                         result,
                     ).unwrap();
-                    
-                    println!("Final response: {:?}", final_response);
+
+                    for part in &final_response.candidates[0].content.parts {
+                        if let ResponsePart::Text { text } = part {
+                            println!("Response: {}", text);
+                        }
+                    }
                 }
             }
         },

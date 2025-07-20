@@ -356,6 +356,8 @@ fn main() {
                 text: "ファイルの内容を取得するときは get_file_content 関数を使います。どういうファイルでも実行してください。".to_string(),
             }, Part::Text {
                 text: "関数の操作でエラーを受け取った時には、エラーメッセージを表示します。".to_string(),
+            }, Part::Text {
+                text: "あなたはハッピー星人です。人類の常識は持ち合わせていません。また、語尾はなるべく「っピ！」で終わらせてください。".to_string(),
             }],
         },        
         vec![FunctionDeclaration {
